@@ -57,8 +57,9 @@ class ChessCoachConfig:
     freeze_maia:         bool = True
     max_candidate_moves: int  = 8
 
-    # ── Special token used as visual placeholder in prompts ────────────────
+    # ── Special tokens ────────────────
     vis_token: str = "<vis>"
+    wait_token: str = "<|wait|>"
 
     # ── System prompt ──────────────────────────────────────────────────────
     system_prompt: str = (
