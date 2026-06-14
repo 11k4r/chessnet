@@ -103,8 +103,8 @@ class ChessCoach(nn.Module):
             trust_remote_code=True,
         )
 
-        # ── 4. Register <vis> special token ──────────────────────────────
-        self.vis_token_id = self._setup_vis_token()
+        # ── 4. Register special tokens ──────────────────────────────
+        self.vis_token_id, self.wait_token_id = self._setup_special_tokens()
 
         # ── 5. Prompt builder ─────────────────────────────────────────────
         self.prompt_builder = PromptBuilder(config, self.tokenizer)
@@ -231,6 +231,7 @@ class ChessCoach(nn.Module):
             histories     = histories,
             device        = device,
             build_labels  = False,
+            left_pad      = True
         )
 
         # 3. Inject visual tokens
@@ -317,23 +318,33 @@ class ChessCoach(nn.Module):
         print("[Maia] Loaded successfully.")
         return model
 
-    def _setup_vis_token(self) -> int:
+    def _setup_special_tokens(self) -> tuple[int, int]:
         """
-        Register <vis> as a new special token, resize Qwen's embedding
-        table to accommodate it, and return its token ID.
+        Register <vis> and <wait> as new special tokens, resize Qwen's embedding
+        table to accommodate them, and return their token IDs.
         """
+        # Pass BOTH tokens in the additional_special_tokens list
         added = self.tokenizer.add_special_tokens(
-            {"additional_special_tokens": [self.config.vis_token]}
+            {"additional_special_tokens": [self.config.vis_token, self.config.wait_token]}
         )
+        
+        # If tokens were added, resize the model's embedding matrix so it doesn't crash
         if added:
             self.llm.resize_token_embeddings(len(self.tokenizer))
             print(f"[ChessCoach] Added {added} special token(s); "
                   f"vocab size now {len(self.tokenizer)}.")
 
+        # Retrieve the newly minted token IDs
         vis_id = self.tokenizer.convert_tokens_to_ids(self.config.vis_token)
+        wait_id = self.tokenizer.convert_tokens_to_ids(self.config.wait_token)
+        
+        # Validation checks
         assert vis_id != self.tokenizer.unk_token_id, \
             "<vis> was not correctly registered in the tokenizer."
-        return vis_id
+        assert wait_id != self.tokenizer.unk_token_id, \
+            "<wait> was not correctly registered in the tokenizer."
+            
+        return vis_id, wait_id
 
     # ─────────────────────────────────────────────────────────────────────
     # Private: batch construction
@@ -348,6 +359,7 @@ class ChessCoach(nn.Module):
         histories:     List[List[Dict[str, str]]],
         device:        torch.device,
         build_labels:  bool,
+        left_pad:      bool = False,
     ) -> Tuple[
         torch.Tensor,           # input_ids      (B, L)
         torch.Tensor,           # attention_mask (B, L)
@@ -403,7 +415,7 @@ class ChessCoach(nn.Module):
             ordered_visuals.append(vis_tensor.to(device))
 
         # Pad to batch max length
-        input_ids, attention_mask = self._pad_sequences(per_item_ids, device)
+        input_ids, attention_mask = self._pad_sequences(per_item_ids, device, left_pad=left_pad)
 
         # Build labels
         labels = (
@@ -490,8 +502,8 @@ class ChessCoach(nn.Module):
                     resp_end   = resp_start
                     while resp_end < len(seq) and seq[resp_end] != self._im_end_id:
                         resp_end += 1
-                    # Supervise every token in this response segment
-                    labels[b, resp_start:resp_end] = input_ids[b, resp_start:resp_end]
+                    # Supervise every token in this response segment (including <|im_end|>)
+                    labels[b, resp_start:resp_end + 1] = input_ids[b, resp_start:resp_end + 1]
                     i = resp_end + 1
                 else:
                     i += 1
@@ -510,6 +522,7 @@ class ChessCoach(nn.Module):
         self,
         sequences: List[torch.Tensor],  # list of 1-D token-ID tensors
         device:    torch.device,
+        left_pad:  bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Right-pad sequences to the longest in the batch.
@@ -528,7 +541,11 @@ class ChessCoach(nn.Module):
 
         for i, seq in enumerate(sequences):
             L = seq.size(0)
-            input_ids[i, :L]      = seq.to(device)
-            attention_mask[i, :L] = 1
+            if left_pad:                 
+                input_ids[i, -L:]      = seq.to(device)
+                attention_mask[i, -L:] = 1
+            else:
+                input_ids[i, :L]      = seq.to(device)
+                attention_mask[i, :L] = 1
 
         return input_ids, attention_mask
